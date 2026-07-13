@@ -38,9 +38,20 @@ REPO_APK_DIR.mkdir(parents=True, exist_ok=True)
 REPO_JAR_DIR.mkdir(parents=True, exist_ok=True)
 REPO_ICON_DIR.mkdir(parents=True, exist_ok=True)
 
-APK_BASE_URL = "https://cdn.jsdelivr.net/gh/keiyoushi/extensions@repo/apk"
-JAR_BASE_URL = "https://raw.githubusercontent.com/keiyoushi/extensions/repo/jar"
-ICON_BASE_URL = "https://cdn.jsdelivr.net/gh/keiyoushi/extensions@repo/icon"
+# ==========================================================================
+# REPO CONFIGURATION — EDIT THESE FOR YOUR OWN REPO
+# ==========================================================================
+# Replace <your-github-username> and <your-repo-name> with your actual values.
+# Example for https://github.com/marbou92/MHExtensions:
+#   APK_BASE_URL = "https://raw.githubusercontent.com/marbou92/MHExtensions/repo/apk"
+#
+# Tip: jsDelivr CDN (https://cdn.jsdelivr.net/gh/<user>/<repo>@repo/apk) is
+# faster than raw.githubusercontent.com for large files, but raw works fine
+# for personal repos. Use whichever you prefer.
+# ==========================================================================
+APK_BASE_URL = "https://raw.githubusercontent.com/marbou92/MHExtensions/repo/apk"
+JAR_BASE_URL = "https://raw.githubusercontent.com/marbou92/MHExtensions/repo/jar"
+ICON_BASE_URL = "https://raw.githubusercontent.com/marbou92/MHExtensions/repo/icon"
 
 to_delete: list[str] = json.loads(sys.argv[1])
 
@@ -131,11 +142,20 @@ all_extensions.extend(new_extensions)
 all_extensions.sort(key=lambda ext: ext.packageName)
 
 index = index_pb2.Index(
-    name="Keiyoushi",
-    badgeLabel="KEI",
-    signingKey="9add655a78e96c4ec7a53ef89dccb557cb5d767489fac5e785d671a5a75d4da2",
+    # ==========================================================================
+    # EDIT THESE FOR YOUR REPO
+    # ==========================================================================
+    # name:          Display name shown in Mihon's extension repos list
+    # signingKey:    The SHA-256 fingerprint of YOUR signing key's public cert.
+    #                Run ./setup-signing.sh to generate it, then paste it here.
+    #                MUST match the signingKeyFingerprint in repo.json exactly.
+    #                WARNING: Do NOT use the value below — it's keiyoushi's key!
+    # ==========================================================================
+    name="MyRepo",
+    badgeLabel="MINE",
+    signingKey="REPLACE_WITH_YOUR_SHA256_FINGERPRINT",
     contact=index_pb2.Contact(
-        website="https://keiyoushi.github.io", discord="https://discord.gg/3FbCpdKbdY"
+        website="https://github.com/marbou92/MHExtensions"
     ),
     extensionList=index_pb2.ExtensionList(extensions=all_extensions),
 )

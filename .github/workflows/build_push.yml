@@ -6,6 +6,15 @@ on:
       - main
       - master
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build type (Debug or Release)"
+        required: false
+        default: "Debug"
+        type: choice
+        options:
+          - Debug
+          - Release
 
 permissions:
   contents: write
@@ -17,6 +26,10 @@ concurrency:
 env:
   CI_CHUNK_SIZE: 80
   IS_PR_CHECK: false
+  # Change this to "Release" once you've set up signing secrets:
+  #   SIGNING_KEY, ALIAS, KEY_STORE_PASSWORD, KEY_PASSWORD
+  # If BUILD_TYPE is Release but secrets are missing, it falls back to Debug automatically.
+  BUILD_TYPE: ${{ github.event.inputs.build_type || 'Debug' }}
 
 jobs:
   prepare:
@@ -26,6 +39,7 @@ jobs:
     outputs:
       matrix: ${{ steps.generate-matrices.outputs.matrix }}
       delete: ${{ steps.generate-matrices.outputs.delete }}
+      effective_build_type: ${{ steps.set-build-type.outputs.type }}
     steps:
       - name: Checkout main branch
         uses: actions/checkout@v4
@@ -37,10 +51,23 @@ jobs:
         with:
           fallback-sha: 4b825dc642cb6eb9a060e54bf8d69288fbee4904 # empty tree
 
+      - name: Determine effective build type
+        id: set-build-type
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: |
+          # If user wants Release but has no signing key, fall back to Debug.
+          if [ "${BUILD_TYPE}" = "Release" ] && [ -z "$SIGNING_KEY" ]; then
+            echo "::warning::BUILD_TYPE is Release but SIGNING_KEY secret is not set — falling back to Debug."
+            echo "type=Debug" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=${BUILD_TYPE}" >> "$GITHUB_OUTPUT"
+          fi
+
       - id: generate-matrices
         name: Create output matrices
         run: |
-          python ./.github/scripts/generate-build-matrices.py "$NX_BASE" Debug
+          python ./.github/scripts/generate-build-matrices.py "$NX_BASE" "${{ steps.set-build-type.outputs.type }}"
 
   build:
     name: Build extensions (${{ matrix.chunk.number }})
@@ -68,9 +95,23 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
+      - name: Prepare signing key
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: |
+          if [ -n "$SIGNING_KEY" ]; then
+            echo "$SIGNING_KEY" | base64 -d > signingkey.jks
+            echo "✓ Signing key prepared."
+          else
+            echo "ℹ No signing key — building debug APK."
+          fi
+
       - name: Build extensions (${{ matrix.chunk.number }})
         env:
           MODULES: ${{ join(matrix.chunk.modules, ' ') }}
+          ALIAS: ${{ secrets.ALIAS }}
+          KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           ./gradlew $MODULES
 
@@ -86,45 +127,30 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+      - name: Clean up signing key
+        if: always()
+        run: rm -f signingkey.jks
+
   # -----------------------------------------------------------------------
-  # Publish job (OPTIONAL — disabled by default)
+  # Publish job — pushes built APKs to a `repo` branch so Mihon can read them
   # -----------------------------------------------------------------------
-  # This publishes the built APKs to a `repo` branch of the SAME repository
-  # so Mihon can read index.min.json from:
-  #   https://raw.githubusercontent.com/<you>/<repo>/repo/index.min.json
-  #
-  # To enable it:
-  #   1. Generate a signing keystore and add these repository secrets:
-  #        SIGNING_KEY         — base64 of your .jks file  (run: base64 -w0 signingkey.jks)
-  #        ALIAS               — your key alias
-  #        KEY_STORE_PASSWORD  — keystore password
-  #        KEY_PASSWORD        — key password
-  #   2. Change the build type in the prepare step above from "Debug" to "Release".
-  #   3. Add the signing-key steps back into the build job (see comments below).
-  #   4. Change `if: false` to `if: true` in the publish job below.
-  #   5. Edit .github/scripts/publish-repo.py to set your APK_BASE_URL /
-  #      JAR_BASE_URL / ICON_BASE_URL / signingKey / name.
-  #
-  # When you re-enable release signing, add these steps to the build job
-  # (BEFORE the "Build extensions" step):
-  #
-  #   - name: Prepare signing key
-  #     run: echo "${{ secrets.SIGNING_KEY }}" | base64 -d > signingkey.jks
-  #
-  #   - name: Build extensions
-  #     env:
-  #       MODULES: ${{ join(matrix.chunk.modules, ' ') }}
-  #       ALIAS: ${{ secrets.ALIAS }}
-  #       KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
-  #       KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-  #     run: ./gradlew $MODULES
-  #
-  #   - name: Clean up signing key
-  #     if: always()
-  #     run: rm -f signingkey.jks
+  # ENABLE this by changing `if: false` to `if: true` below, AND:
+  #   1. Set the BUILD_TYPE env var above to "Release" (or pass it via workflow_dispatch)
+  #   2. Set up signing secrets (SIGNING_KEY, ALIAS, KEY_STORE_PASSWORD, KEY_PASSWORD)
+  #      — run ./setup-signing.sh to generate them
+  #   3. Create a `repo` branch in this same repo (or a separate extensions repo):
+  #        git checkout --orphan repo
+  #        git rm -rf .
+  #        mkdir apk jar icon
+  #        echo '{"index_v2":"https://raw.githubusercontent.com/<you>/<repo>/repo/index.pb","meta":{"name":"MyRepo","website":"https://github.com/<you>/<repo>","signingKeyFingerprint":"<your-fingerprint>"}}' > repo.json
+  #        git add . && git commit -m "init repo branch" && git push origin repo
+  #   4. Edit .github/scripts/publish-repo.py — set your APK_BASE_URL, JAR_BASE_URL,
+  #      ICON_BASE_URL, signingKey, name, contact.
+  #   5. In Mihon: More → Settings → Browse → Extension repos → Add:
+  #        https://raw.githubusercontent.com/<you>/<repo>/repo/index.min.json
   # -----------------------------------------------------------------------
   publish:
-    name: Publish extension repo (disabled)
+    name: Publish extension repo
     needs: [prepare, build]
     if: false
     runs-on: ubuntu-latest
