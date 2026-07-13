@@ -65,9 +65,9 @@ abstract class Comix : HttpSource() {
         // "title" is naturally ascending; everything else descending by default
         val sortDir = if (sortAscending) "asc" else "desc"
 
-        val types = filters.firstInstance<TypeFilter>()?.values?.filter { it.state }?.map { it.value } ?: emptyList()
-        val statuses = filters.firstInstance<StatusFilter>()?.values?.filter { it.state }?.map { it.value } ?: emptyList()
-        val contentRatings = filters.firstInstance<ContentRatingFilter>()?.values?.filter { it.state }?.map { it.value }
+        val types = filters.firstInstance<TypeFilter>()?.state?.filter { it.state }?.map { it.value } ?: emptyList()
+        val statuses = filters.firstInstance<StatusFilter>()?.state?.filter { it.state }?.map { it.value } ?: emptyList()
+        val contentRatings = filters.firstInstance<ContentRatingFilter>()?.state?.filter { it.state }?.map { it.value }
             ?: listOf("safe", "suggestive")
 
         return mangaListRequest(
