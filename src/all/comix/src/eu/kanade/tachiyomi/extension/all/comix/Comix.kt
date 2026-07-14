@@ -77,9 +77,9 @@ abstract class Comix : HttpSource() {
         val genresIncl = filters.firstInstance<GenreFilter>()?.state?.filter { it.state }?.map { it.value } ?: emptyList()
         val contentRatings = filters.firstInstance<ContentRatingFilter>()?.state?.filter { it.state }?.map { it.value }
             ?: listOf("safe", "suggestive")
-        val minChapters = filters.firstInstance<MinChaptersFilter>()?.state?.toIntOrNull() ?: ""
-        val yearFrom = filters.firstInstance<YearFromFilter>()?.state?.toIntOrNull() ?: ""
-        val yearTo = filters.firstInstance<YearToFilter>()?.state?.toIntOrNull() ?: ""
+        val minChapters = (filters.firstInstance<MinChaptersFilter>()?.state as? String)?.toIntOrNull()?.toString() ?: ""
+        val yearFrom = (filters.firstInstance<YearFromFilter>()?.state as? String)?.toIntOrNull()?.toString() ?: ""
+        val yearTo = (filters.firstInstance<YearToFilter>()?.state as? String)?.toIntOrNull()?.toString() ?: ""
 
         return mangaListRequest(
             page = page,
