@@ -108,12 +108,26 @@ abstract class Comix : HttpSource() {
 
     override fun chapterListRequest(manga: SManga): Request {
         val hid = manga.url
-        return GET("$apiBaseUrl/manga/$hid/chapters?limit=500", apiHeaders)
+        return GET("$apiBaseUrl/manga/$hid/chapters?page=1&limit=100", apiHeaders)
     }
 
     override fun chapterListParse(response: Response): List<SChapter> {
         val data = response.parseAs<ComixChapterListDto>()
-        return data.items.map { it.toSChapter() }
+        val items = data.items.toMutableList()
+        val hid = response.request.url.encodedPath
+            .substringAfter("/manga/")
+            .substringBefore("/chapters")
+        var page = 1
+        while (data.meta?.hasNext == true && page < 50) {
+            page++
+            val nextReq = GET("$apiBaseUrl/manga/$hid/chapters?page=$page&limit=100", apiHeaders)
+            val nextResp = client.newCall(nextReq).execute()
+            val nextData = nextResp.parseAs<ComixChapterListDto>()
+            items.addAll(nextData.items)
+            nextResp.close()
+            if (nextData.meta?.hasNext != true) break
+        }
+        return items.map { it.toSChapter() }
     }
 
     // =============================== Pages ===============================
@@ -164,7 +178,7 @@ abstract class Comix : HttpSource() {
             .addQueryParameter("limit", "28")
             .addQueryParameter("order[$sortBy]", sortDir)
             .apply {
-                query?.takeIf { it.isNotBlank() }?.let { addQueryParameter("q", it) }
+                query?.takeIf { it.isNotBlank() }?.let { addQueryParameter("keyword", it) }
                 types.forEach { addQueryParameter("types[]", it) }
                 statuses.forEach { addQueryParameter("statuses[]", it) }
                 contentRatings.forEach { addQueryParameter("content_rating[]", it) }
