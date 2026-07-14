@@ -142,8 +142,7 @@ abstract class Comix : HttpSource() {
     // Mihon downloads images using a SEPARATE client. The image CDNs require
     // a proper User-Agent and Referer, otherwise they may return a Cloudflare
     // challenge page (HTML) instead of image data, causing decoder errors.
-    override fun imageRequest(page: Page): Request =
-        GET(page.imageUrl!!, headers.newBuilder().add("Accept", "image/*,*/*;q=0.8").build())
+    override fun imageRequest(page: Page): Request = GET(page.imageUrl!!, headers.newBuilder().add("Accept", "image/*,*/*;q=0.8").build())
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
