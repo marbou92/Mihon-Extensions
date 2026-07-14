@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.extension.all.comix
 
 import android.util.Base64
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -10,6 +11,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.annotation.Source
+import keiyoushi.utils.getPreferences
 import keiyoushi.utils.parseAs
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
@@ -20,9 +22,11 @@ import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 
 @Source
-abstract class Comix : HttpSource() {
+abstract class Comix : HttpSource(), ConfigurableSource {
 
     override val supportsLatest = true
+
+    private val preferences = getPreferences()
 
     override val client: OkHttpClient = network.client.newBuilder()
         .addInterceptor(::signRequestInterceptor)
@@ -71,12 +75,19 @@ abstract class Comix : HttpSource() {
         val sortBy = sortOptions[sortIndex] ?: "relevance"
         val sortDir = if (sortAscending) "asc" else "desc"
 
-        val types = filters.firstInstance<TypeFilter>()?.state?.filter { it.state }?.map { it.value } ?: emptyList()
+        // Use defaults from preferences, override with filter selections if any
+        val defaultTypes = preferences.getDefaultTypes()
+        val defaultDemos = preferences.getDefaultDemographics()
+        val defaultContentRatings = preferences.getContentRatings()
+
+        val types = filters.firstInstance<TypeFilter>()?.state?.filter { it.state }?.map { it.value }
+            ?.ifEmpty { defaultTypes }
         val statuses = filters.firstInstance<StatusFilter>()?.state?.filter { it.state }?.map { it.value } ?: emptyList()
-        val demographics = filters.firstInstance<DemographicFilter>()?.state?.filter { it.state }?.map { it.value } ?: emptyList()
+        val demographics = filters.firstInstance<DemographicFilter>()?.state?.filter { it.state }?.map { it.value }
+            ?.ifEmpty { defaultDemos }
         val genresIncl = filters.firstInstance<GenreFilter>()?.state?.filter { it.state }?.map { it.value } ?: emptyList()
         val contentRatings = filters.firstInstance<ContentRatingFilter>()?.state?.filter { it.state }?.map { it.value }
-            ?: listOf("safe", "suggestive")
+            ?.ifEmpty { defaultContentRatings }
         val minChapters = (filters.firstInstance<MinChaptersFilter>()?.state as? String)?.toIntOrNull()?.toString() ?: ""
         val yearFrom = (filters.firstInstance<YearFromFilter>()?.state as? String)?.toIntOrNull()?.toString() ?: ""
         val yearTo = (filters.firstInstance<YearToFilter>()?.state as? String)?.toIntOrNull()?.toString() ?: ""
@@ -86,10 +97,10 @@ abstract class Comix : HttpSource() {
             sortBy = sortBy,
             sortDir = sortDir,
             query = query.takeIf { it.isNotBlank() },
-            types = types,
+            types = types ?: emptyList(),
             statuses = statuses,
-            contentRatings = contentRatings,
-            demographics = demographics,
+            contentRatings = contentRatings ?: emptyList(),
+            demographics = demographics ?: emptyList(),
             genresIncl = genresIncl,
             minChapters = minChapters,
             yearFrom = yearFrom,
@@ -136,7 +147,25 @@ abstract class Comix : HttpSource() {
             nextResp.close()
             if (nextData.meta?.hasNext != true) break
         }
-        return items.map { it.toSChapter() }
+
+        var chapters = items.map { it.toSChapter() }
+
+        // Deduplicate chapters by number (keep first of each)
+        if (preferences.deduplicateChapters()) {
+            chapters = chapters.distinctBy { it.chapter_number }
+        }
+
+        // Filter by scanlator preference
+        val scanlatorPref = preferences.getScanlatorFilter()
+        if (scanlatorPref.isNotBlank()) {
+            chapters = chapters.filter { ch ->
+                scanlatorPref.split(",").any { s ->
+                    ch.scanlator?.contains(s.trim(), ignoreCase = true) == true
+                }
+            }
+        }
+
+        return chapters
     }
 
     // =============================== Pages ===============================
@@ -520,27 +549,110 @@ abstract class Comix : HttpSource() {
         thumbnail_url = poster?.large ?: poster?.medium
     }
 
-    private fun ComixMangaDetailDto.toSManga(): SManga = SManga.create().apply {
-        url = hid
-        title = this@toSManga.title
-        author = authors.joinToString(", ") { it.title }
-        artist = artists.joinToString(", ") { it.title }
-        genre = buildList {
-            addAll(genres.map { it.title })
-            addAll(demographics.map { it.title })
-            addAll(formats.map { it.title })
-            addAll(tags.map { it.title })
-        }.distinct().joinToString(", ")
-        description = synopsis
-        status = when (this@toSManga.status) {
-            "releasing" -> SManga.ONGOING
-            "finished" -> SManga.COMPLETED
-            "cancelled" -> SManga.CANCELLED
-            "hiatus" -> SManga.ON_HIATUS
-            else -> SManga.UNKNOWN
+    private fun ComixMangaDetailDto.toSManga(): SManga {
+        val showAltNames = preferences.showAltNames()
+        val showExtraInfo = preferences.showExtraInfo()
+        val showTagsInGenre = preferences.showTagsInGenre()
+        val blockedGenres = preferences.getBlockedGenres()
+        val scorePosition = preferences.getScorePosition()
+
+        // Build genre chips
+        val genreChips = buildList {
+            if (showTagsInGenre) {
+                addAll(genres.map { it.title })
+                addAll(demographics.map { it.title })
+                addAll(formats.map { it.title })
+                addAll(tags.map { it.title })
+            } else {
+                addAll(genres.map { it.title })
+                addAll(demographics.map { it.title })
+            }
+        }.distinct()
+            .filterNot { it.lowercase() in blockedGenres }
+            .joinToString(", ")
+
+        // Build description
+        val desc = buildString {
+            synopsis?.let { append(it) }
+
+            if (showAltNames && altTitles.isNotEmpty()) {
+                if (isNotEmpty()) append("\n\n")
+                append("Alternative names:\n")
+                append(altTitles.joinToString("\n") { "• $it" })
+            }
+
+            if (showExtraInfo) {
+                if (isNotEmpty()) append("\n\n")
+                append("Type: ${type ?: "Unknown"}\n")
+                append("Status: ${formatStatus(this@toSManga.status)}\n")
+                append("Year: ${year ?: "?"}\n")
+                append("Content: ${formatContentRating(contentRating)}\n")
+                append("Original language: ${formatLanguage(originalLanguage)}\n")
+                if (followsTotal != null && followsTotal > 0) {
+                    append("Follows: $followsTotal\n")
+                }
+                if (ratedAvg != null && ratedCount != null && ratedCount > 0) {
+                    append("Rating: $ratedAvg ($ratedCount votes)\n")
+                }
+                if (latestChapter != null && latestChapter > 0) {
+                    append("Latest chapter: ${latestChapter.toString().removeSuffix(".0")}\n")
+                }
+            }
+
+            // Score display
+            if (scorePosition == "description" && ratedAvg != null && ratedCount != null && ratedCount > 0) {
+                if (isNotEmpty()) append("\n")
+                append("\n⭐ Score: $ratedAvg/10 ($ratedCount votes)")
+            }
+        }.trim()
+
+        return SManga.create().apply {
+            url = hid
+            title = this@toSManga.title
+            author = authors.joinToString(", ") { it.title }.ifBlank { null }
+            artist = artists.joinToString(", ") { it.title }.ifBlank { null }
+            genre = genreChips.ifBlank { null }
+            description = desc.ifBlank { synopsis }
+            status = when (this@toSManga.status) {
+                "releasing" -> SManga.ONGOING
+                "finished" -> SManga.COMPLETED
+                "cancelled" -> SManga.CANCELLED
+                "on_hiatus" -> SManga.ON_HIATUS
+                "discontinued" -> SManga.CANCELLED
+                else -> SManga.UNKNOWN
+            }
+            thumbnail_url = poster?.large ?: poster?.medium
+            // Score in title prefix
+            if (scorePosition == "title" && ratedAvg != null && ratedCount != null && ratedCount > 0) {
+                title = "[${ratedAvg}] ${this@toSManga.title}"
+            }
+            initialized = true
         }
-        thumbnail_url = poster?.large ?: poster?.medium
-        initialized = true
+    }
+
+    private fun formatStatus(status: String?): String = when (status) {
+        "releasing" -> "Releasing"
+        "finished" -> "Finished"
+        "on_hiatus" -> "On hiatus"
+        "discontinued" -> "Discontinued"
+        "cancelled" -> "Cancelled"
+        else -> "Unknown"
+    }
+
+    private fun formatContentRating(rating: String?): String = when (rating) {
+        "safe" -> "Safe"
+        "suggestive" -> "Suggestive"
+        "erotica" -> "Erotica"
+        "pornographic" -> "Pornographic"
+        else -> "Unknown"
+    }
+
+    private fun formatLanguage(lang: String?): String = when (lang) {
+        "ko" -> "Korean"
+        "ja" -> "Japanese"
+        "zh" -> "Chinese"
+        "en" -> "English"
+        else -> lang ?: "Unknown"
     }
 
     private fun ComixChapterDto.toSChapter(): SChapter {
@@ -592,7 +704,147 @@ abstract class Comix : HttpSource() {
 
     private inline fun <reified T : Filter<*>> FilterList.firstInstance(): T? = filterIsInstance<T>().firstOrNull()
 
+    // ========================================================================
+    // Settings / Preferences
+    // ========================================================================
+
+    override fun setupPreferenceScreen(screen: androidx.preference.PreferenceScreen) {
+        // Content rating
+        androidx.preference.MultiSelectListPreference(screen.context).apply {
+            key = PREF_CONTENT_RATING
+            title = "Default content rating"
+            summary = "Content ratings to show by default in browse/search"
+            entries = arrayOf("Safe", "Suggestive", "Erotica", "Pornographic")
+            entryValues = arrayOf("safe", "suggestive", "erotica", "pornographic")
+            setDefaultValue(setOf("safe", "suggestive"))
+        }.let(screen::addPreference)
+
+        // Default type
+        androidx.preference.MultiSelectListPreference(screen.context).apply {
+            key = PREF_DEFAULT_TYPES
+            title = "Default type filter"
+            summary = "Manga types to show by default (empty = all)"
+            entries = arrayOf("Manga", "Manhwa", "Manhua", "Other")
+            entryValues = arrayOf("manga", "manhwa", "manhua", "other")
+            setDefaultValue(emptySet<String>())
+        }.let(screen::addPreference)
+
+        // Default demographics
+        androidx.preference.MultiSelectListPreference(screen.context).apply {
+            key = PREF_DEFAULT_DEMOGRAPHICS
+            title = "Default demographic filter"
+            summary = "Demographics to show by default (empty = all)"
+            entries = arrayOf("Shounen", "Seinen", "Shoujo", "Josei")
+            entryValues = arrayOf("shounen", "seinen", "shoujo", "josei")
+            setDefaultValue(emptySet<String>())
+        }.let(screen::addPreference)
+
+        // Blocked genres
+        androidx.preference.EditTextPreference(screen.context).apply {
+            key = PREF_BLOCKED_GENRES
+            title = "Blocked genres"
+            summary = "Comma-separated genre names to hide from genre chips"
+            setDefaultValue("")
+        }.let(screen::addPreference)
+
+        // Deduplicate chapters
+        androidx.preference.SwitchPreferenceCompat(screen.context).apply {
+            key = PREF_DEDUPLICATE_CHAPTERS
+            title = "Deduplicate chapters"
+            summary = "Keep only one chapter per number (useful when multiple scanlators upload the same chapter)"
+            setDefaultValue(false)
+        }.let(screen::addPreference)
+
+        // Scanlator filter
+        androidx.preference.EditTextPreference(screen.context).apply {
+            key = PREF_SCANLATOR_FILTER
+            title = "Scanlator filter"
+            summary = "Comma-separated scanlator names to show (empty = show all)"
+            setDefaultValue("")
+        }.let(screen::addPreference)
+
+        // Show alt names
+        androidx.preference.SwitchPreferenceCompat(screen.context).apply {
+            key = PREF_SHOW_ALT_NAMES
+            title = "Show alternative names"
+            summary = "Display alternative titles in the description"
+            setDefaultValue(true)
+        }.let(screen::addPreference)
+
+        // Show extra info
+        androidx.preference.SwitchPreferenceCompat(screen.context).apply {
+            key = PREF_SHOW_EXTRA_INFO
+            title = "Show extra info in description"
+            summary = "Display type, status, year, content rating, follows, rating, latest chapter"
+            setDefaultValue(true)
+        }.let(screen::addPreference)
+
+        // Show tags in genre chips
+        androidx.preference.SwitchPreferenceCompat(screen.context).apply {
+            key = PREF_SHOW_TAGS_IN_GENRE
+            title = "Show tags in genre chips"
+            summary = "Include format tags (Long Strip, Full Color, etc.) in the genre field"
+            setDefaultValue(true)
+        }.let(screen::addPreference)
+
+        // Score display position
+        androidx.preference.ListPreference(screen.context).apply {
+            key = PREF_SCORE_POSITION
+            title = "Score display position"
+            summary = "Where to display the manga score"
+            entries = arrayOf("Don't show", "In title (prefix)", "In description (bottom)")
+            entryValues = arrayOf("none", "title", "description")
+            setDefaultValue("description")
+        }.let(screen::addPreference)
+    }
+
+    private fun androidx.preference.SharedPreferences.getDefaultTypes(): List<String> =
+        getStringSet(PREF_DEFAULT_TYPES, emptySet())?.toList() ?: emptyList()
+
+    private fun androidx.preference.SharedPreferences.getDefaultDemographics(): List<String> =
+        getStringSet(PREF_DEFAULT_DEMOGRAPHICS, emptySet())?.toList() ?: emptyList()
+
+    private fun androidx.preference.SharedPreferences.getContentRatings(): List<String> =
+        getStringSet(PREF_CONTENT_RATING, setOf("safe", "suggestive"))?.toList()
+            ?: listOf("safe", "suggestive")
+
+    private fun androidx.preference.SharedPreferences.getBlockedGenres(): List<String> =
+        getString(PREF_BLOCKED_GENRES, "")
+            ?.split(",")
+            ?.map { it.trim().lowercase() }
+            ?.filter { it.isNotBlank() }
+            ?: emptyList()
+
+    private fun androidx.preference.SharedPreferences.deduplicateChapters(): Boolean =
+        getBoolean(PREF_DEDUPLICATE_CHAPTERS, false)
+
+    private fun androidx.preference.SharedPreferences.getScanlatorFilter(): String =
+        getString(PREF_SCANLATOR_FILTER, "") ?: ""
+
+    private fun androidx.preference.SharedPreferences.showAltNames(): Boolean =
+        getBoolean(PREF_SHOW_ALT_NAMES, true)
+
+    private fun androidx.preference.SharedPreferences.showExtraInfo(): Boolean =
+        getBoolean(PREF_SHOW_EXTRA_INFO, true)
+
+    private fun androidx.preference.SharedPreferences.showTagsInGenre(): Boolean =
+        getBoolean(PREF_SHOW_TAGS_IN_GENRE, true)
+
+    private fun androidx.preference.SharedPreferences.getScorePosition(): String =
+        getString(PREF_SCORE_POSITION, "description") ?: "description"
+
     companion object {
+        private const val PREF_CONTENT_RATING = "pref_content_rating"
+        private const val PREF_DEFAULT_TYPES = "pref_default_types"
+        private const val PREF_DEFAULT_DEMOGRAPHICS = "pref_default_demographics"
+        private const val PREF_BLOCKED_GENRES = "pref_blocked_genres"
+        private const val PREF_DEDUPLICATE_CHAPTERS = "pref_deduplicate_chapters"
+        private const val PREF_SCANLATOR_FILTER = "pref_scanlator_filter"
+        private const val PREF_SHOW_ALT_NAMES = "pref_show_alt_names"
+        private const val PREF_SHOW_EXTRA_INFO = "pref_show_extra_info"
+        private const val PREF_SHOW_TAGS_IN_GENRE = "pref_show_tags_in_genre"
+        private const val PREF_SCORE_POSITION = "pref_score_position"
+
         private const val SBOX1_B64 = "gbicCvAMzfcXEtGAyjvvhmb2yCWzWhjqcxXZ7ZhpzANOzoQLo3nuPZ2vK9dkb9hJExC0Vni/hdQBceI+mw611gkhQFjBuf4bJg1TxYqM+SL4YDqtwjxiGSdeH7so7Fn1HiRo37Z+RNvl44twXWVhomtMjw+8bemfmv9XEXr7mS82MxaCOJZRR0oHd9PLI5O+gyBGT6hcLoduNa7yCObVVCk3bFWsoD+xcqTrBcP6dNJN/NB1Br2QGhSN2snHAqeRNKVFQiyeAFLPSKGwY8aq9EPgsi17qd4ywPMxiH8w6N1qX1tLKtzhOeemHWeJQfFQ5H23q7qSlJUcjgTEl3x2/Q=="
         private const val KEY1_B64 = "rafYl4oSAKQX+GYoic9oW4iGwiYpZzs0"
         private const val SBOX2_B64 = "2lQehmgyYFAoWUi0haazZqHy5zZ34NN+VzlfsoB2Y1yY0IuMLjgVcV2xt8t4moH+AP0NMJ5qekW7DFIHEWKkOgIBIMhDdA8lbM6iHKjDlq6IChpb3CnA9NmsvQW/afdt1SfJjTdwcvpKqunCJLxBFmXX9hecm6tGb+HRxD7BC3njoxPxgnX5pdKP1IMSkd4/O3NRfZSE6DVLG2s9uexaipA05cpJzE8Qkv/z5jzHAwlEWOLd3yxA+0cvVbpOoJPFGc8f1lb4vu2HUxjuuEwEQk0GsPCVnyKvfOoh9TG2YYmZLV4I67UU2NsrrakqZ47k/O+ne25/DjPGZCMdnZcmzQ=="
