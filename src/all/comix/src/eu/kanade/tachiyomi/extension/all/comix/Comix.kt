@@ -85,9 +85,9 @@ abstract class Comix :
         val types = filters.firstInstance<TypeFilter>()?.state?.filter { it.state }?.map { it.value }
             ?.ifEmpty { defaultTypes }
         val statuses = filters.firstInstance<StatusFilter>()?.state?.filter { it.state }?.map { it.value } ?: emptyList()
-        val demographics = filters.firstInstance<DemographicFilter>()?.state?.filter { it.state }?.map { it.value }
-            ?.ifEmpty { defaultDemos }
-        val genresIncl = filters.firstInstance<GenreFilter>()?.state?.filter { it.state }?.map { it.value } ?: emptyList()
+        val demographics = filters.firstInstance<DemographicFilter>()?.state?.filter { it.state }?.map { it.id }
+            ?.ifEmpty { defaultDemos.mapNotNull { it.toIntOrNull() } }
+        val genresIncl = filters.firstInstance<GenreFilter>()?.state?.filter { it.state }?.map { it.id } ?: emptyList()
         val contentRatings = filters.firstInstance<ContentRatingFilter>()?.state?.filter { it.state }?.map { it.value }
             ?.ifEmpty { defaultContentRatings }
         val minChapters = (filters.firstInstance<MinChaptersFilter>()?.state as? String)?.toIntOrNull()?.toString() ?: ""
@@ -238,8 +238,8 @@ abstract class Comix :
         types: List<String> = emptyList(),
         statuses: List<String> = emptyList(),
         contentRatings: List<String> = listOf("safe", "suggestive"),
-        demographics: List<String> = emptyList(),
-        genresIncl: List<String> = emptyList(),
+        demographics: List<Int> = emptyList(),
+        genresIncl: List<Int> = emptyList(),
         minChapters: String = "",
         yearFrom: String = "",
         yearTo: String = "",
@@ -250,11 +250,11 @@ abstract class Comix :
             .addQueryParameter("order[$sortBy]", sortDir)
             .apply {
                 query?.takeIf { it.isNotBlank() }?.let { addQueryParameter("keyword", it) }
-                types.forEach { addQueryParameter("types[]", it) }
-                statuses.forEach { addQueryParameter("statuses[]", it) }
-                contentRatings.forEach { addQueryParameter("content_rating[]", it) }
-                demographics.forEach { addQueryParameter("demographics[]", it) }
-                genresIncl.forEach { addQueryParameter("genres_in[]", it) }
+                types.forEachIndexed { i, v -> addQueryParameter("types[$i]", v) }
+                statuses.forEachIndexed { i, v -> addQueryParameter("statuses[$i]", v) }
+                contentRatings.forEachIndexed { i, v -> addQueryParameter("content_rating[$i]", v) }
+                demographics.forEachIndexed { i, v -> addQueryParameter("demographics[$i]", v.toString()) }
+                genresIncl.forEachIndexed { i, v -> addQueryParameter("genres_in[$i]", v.toString()) }
                 if (minChapters.isNotBlank()) addQueryParameter("min_chap", minChapters)
                 if (yearFrom.isNotBlank()) addQueryParameter("year_from", yearFrom)
                 if (yearTo.isNotBlank()) addQueryParameter("year_to", yearTo)
@@ -343,51 +343,51 @@ abstract class Comix :
         )
 
     private class DemographicFilter :
-        Filter.Group<CheckboxFilter>(
+        Filter.Group<IdCheckboxFilter>(
             "Demographic",
             listOf(
-                CheckboxFilter("Shounen", "shounen"),
-                CheckboxFilter("Seinen", "seinen"),
-                CheckboxFilter("Shoujo", "shoujo"),
-                CheckboxFilter("Josei", "josei"),
+                IdCheckboxFilter("Shounen", 2),
+                IdCheckboxFilter("Seinen", 4),
+                IdCheckboxFilter("Shoujo", 1),
+                IdCheckboxFilter("Josei", 3),
             ),
         )
 
     private class GenreFilter :
-        Filter.Group<CheckboxFilter>(
+        Filter.Group<IdCheckboxFilter>(
             "Genres (include)",
             listOf(
-                CheckboxFilter("Action", "action"),
-                CheckboxFilter("Adventure", "adventure"),
-                CheckboxFilter("Boys Love", "boys-love"),
-                CheckboxFilter("Comedy", "comedy"),
-                CheckboxFilter("Crime", "crime"),
-                CheckboxFilter("Drama", "drama"),
-                CheckboxFilter("Ecchi", "ecchi"),
-                CheckboxFilter("Fantasy", "fantasy"),
-                CheckboxFilter("Girls Love", "girls-love"),
-                CheckboxFilter("Harem", "harem"),
-                CheckboxFilter("Hentai", "hentai"),
-                CheckboxFilter("Historical", "historical"),
-                CheckboxFilter("Horror", "horror"),
-                CheckboxFilter("Isekai", "isekai"),
-                CheckboxFilter("Magical Girls", "magical-girls"),
-                CheckboxFilter("Mature", "mature"),
-                CheckboxFilter("Mecha", "mecha"),
-                CheckboxFilter("Medical", "medical"),
-                CheckboxFilter("Mystery", "mystery"),
-                CheckboxFilter("Philosophical", "philosophical"),
-                CheckboxFilter("Psychological", "psychological"),
-                CheckboxFilter("Romance", "romance"),
-                CheckboxFilter("Sci-Fi", "sci-fi"),
-                CheckboxFilter("Slice of Life", "slice-of-life"),
-                CheckboxFilter("Sports", "sports"),
-                CheckboxFilter("Superhero", "superhero"),
-                CheckboxFilter("Smut", "smut"),
-                CheckboxFilter("Tragedy", "tragedy"),
-                CheckboxFilter("Thriller", "thriller"),
-                CheckboxFilter("Wuxia", "wuxia"),
-                CheckboxFilter("Adult", "adult"),
+                IdCheckboxFilter("Action", 6),
+                IdCheckboxFilter("Adventure", 7),
+                IdCheckboxFilter("Boys Love", 8),
+                IdCheckboxFilter("Comedy", 9),
+                IdCheckboxFilter("Crime", 10),
+                IdCheckboxFilter("Drama", 11),
+                IdCheckboxFilter("Fantasy", 12),
+                IdCheckboxFilter("Girls Love", 13),
+                IdCheckboxFilter("Harem", 40),
+                IdCheckboxFilter("Historical", 14),
+                IdCheckboxFilter("Horror", 15),
+                IdCheckboxFilter("Isekai", 16),
+                IdCheckboxFilter("Magical Girls", 17),
+                IdCheckboxFilter("Mecha", 18),
+                IdCheckboxFilter("Medical", 19),
+                IdCheckboxFilter("Mystery", 20),
+                IdCheckboxFilter("Philosophical", 21),
+                IdCheckboxFilter("Psychological", 22),
+                IdCheckboxFilter("Romance", 23),
+                IdCheckboxFilter("Sci-Fi", 24),
+                IdCheckboxFilter("Slice of Life", 25),
+                IdCheckboxFilter("Sports", 26),
+                IdCheckboxFilter("Superhero", 27),
+                IdCheckboxFilter("Thriller", 28),
+                IdCheckboxFilter("Tragedy", 29),
+                IdCheckboxFilter("Wuxia", 30),
+                IdCheckboxFilter("Adult", 87264),
+                IdCheckboxFilter("Ecchi", 87265),
+                IdCheckboxFilter("Hentai", 87266),
+                IdCheckboxFilter("Mature", 87267),
+                IdCheckboxFilter("Smut", 87268),
             ),
         )
 
@@ -409,6 +409,8 @@ abstract class Comix :
     private class YearToFilter : Filter.Text("Year to", "")
 
     private class CheckboxFilter(name: String, val value: String, default: Boolean = false) : Filter.CheckBox(name, default)
+
+    private class IdCheckboxFilter(name: String, val id: Int, default: Boolean = false) : Filter.CheckBox(name, default)
 
     // ========================================================================
     // Sign + Decrypt (reverse-engineered API protection)
