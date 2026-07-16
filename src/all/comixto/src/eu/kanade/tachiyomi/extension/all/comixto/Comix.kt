@@ -554,12 +554,12 @@ abstract class Comix :
         val output = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output)
 
-        // Simple reverse scramble: swap (i,j) with (j,i) — transpose the grid
+        // Descramble: rotate 180 degrees (reverse both rows and columns)
         for (i in 0 until cols * rows) {
             val dstCol = i % cols
             val dstRow = i / cols
-            val srcCol = dstRow
-            val srcRow = dstCol
+            val srcCol = cols - 1 - dstCol
+            val srcRow = rows - 1 - dstRow
             val srcRect = Rect(srcCol * tileW, srcRow * tileH, (srcCol + 1) * tileW, (srcRow + 1) * tileH)
             val dstRect = Rect(dstCol * tileW, dstRow * tileH, (dstCol + 1) * tileW, (dstRow + 1) * tileH)
             canvas.drawBitmap(bitmap, srcRect, dstRect, null)
