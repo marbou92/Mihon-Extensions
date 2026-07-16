@@ -1,5 +1,9 @@
 package eu.kanade.tachiyomi.extension.all.comixto
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Rect
 import android.util.Base64
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.ConfigurableSource
@@ -33,6 +37,7 @@ abstract class Comix :
     override val client: OkHttpClient = network.client.newBuilder()
         .addInterceptor(::signRequestInterceptor)
         .addInterceptor(::decryptResponseInterceptor)
+        .addInterceptor(::descrambleImageInterceptor)
         .build()
 
     // Default headers: only Referer (safe for both API and image requests)
@@ -216,7 +221,10 @@ abstract class Comix :
         val pages = container?.items ?: emptyList()
         return pages.mapIndexed { index, pageDto ->
             val cleanUrl = (base + pageDto.url).substringBefore("?")
-            Page(index, imageUrl = cleanUrl)
+            // Pages with s=1 are tile-scrambled (every 10th page)
+            // Append fragment #scrambled so the image interceptor knows to descramble
+            val finalUrl = if (pageDto.s == 1) "$cleanUrl#scrambled" else cleanUrl
+            Page(index, imageUrl = finalUrl)
         }
     }
 
@@ -510,6 +518,61 @@ abstract class Comix :
 
         return response.newBuilder()
             .body(content.toResponseBody("application/json".toMediaType()))
+            .build()
+    }
+
+    /**
+     * Descrambles images that have the #scrambled fragment in the URL.
+     * Every 10th page (page 9, 19, 29...) has s=1 in the API response,
+     * meaning the image is tile-scrambled with a 5x5 grid.
+     * This reverses the scrambling by swapping tiles back to their original positions.
+     */
+    private fun descrambleImageInterceptor(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val fragment = request.url.fragment
+
+        // Only descramble if the URL has #scrambled fragment
+        if (fragment != "scrambled") return chain.proceed(request)
+
+        // Build the request WITHOUT the fragment (CDN doesn't know about it)
+        val cleanRequest = request.newBuilder()
+            .url(request.url.newBuilder().fragment(null).build())
+            .build()
+        val response = chain.proceed(cleanRequest)
+        val body = response.body ?: return response
+
+        val imageBytes = body.bytes()
+        val bitmap = BitmapFactory.decodeStream(imageBytes.inputStream())
+            ?: return response
+
+        val cols = 5
+        val rows = 5
+        val tileW = bitmap.width / cols
+        val tileH = bitmap.height / rows
+        if (tileW < 1 || tileH < 1) return response
+
+        val output = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(output)
+
+        // Simple reverse scramble: swap (i,j) with (j,i) — transpose the grid
+        for (i in 0 until cols * rows) {
+            val dstCol = i % cols
+            val dstRow = i / cols
+            val srcCol = dstRow
+            val srcRow = dstCol
+            val srcRect = Rect(srcCol * tileW, srcRow * tileH, (srcCol + 1) * tileW, (srcRow + 1) * tileH)
+            val dstRect = Rect(dstCol * tileW, dstRow * tileH, (dstCol + 1) * tileW, (dstRow + 1) * tileH)
+            canvas.drawBitmap(bitmap, srcRect, dstRect, null)
+        }
+
+        val outBytes = java.io.ByteArrayOutputStream().apply {
+            output.compress(Bitmap.CompressFormat.WEBP, 100, this)
+        }.toByteArray()
+        bitmap.recycle()
+        output.recycle()
+
+        return response.newBuilder()
+            .body(outBytes.toResponseBody("image/webp".toMediaType()))
             .build()
     }
 
