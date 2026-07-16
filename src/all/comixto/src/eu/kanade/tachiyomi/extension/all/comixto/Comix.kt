@@ -238,7 +238,7 @@ abstract class Comix :
         if (!url.contains("__descramble")) {
             return throw UnsupportedOperationException()
         }
-        
+
         // Read scramble params from response headers
         val scrambleGrid = response.header("X-Scramble-Grid") ?: return throw UnsupportedOperationException()
         val scrambleSeed = response.header("X-Scramble-Seed")?.toLongOrNull() ?: 0L
