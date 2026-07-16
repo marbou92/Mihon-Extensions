@@ -37,7 +37,6 @@ abstract class Comix :
     override val client: OkHttpClient = network.client.newBuilder()
         .addInterceptor(::signRequestInterceptor)
         .addInterceptor(::decryptResponseInterceptor)
-        .addNetworkInterceptor(::descrambleImageInterceptor)
         .build()
 
     // Default headers: only Referer (safe for both API and image requests)
@@ -219,12 +218,73 @@ abstract class Comix :
         val container = data.pages
         val base = container?.baseUrl.orEmpty()
         val pages = container?.items ?: emptyList()
-        return pages.mapIndexed { index, pageDto ->
+        val resultList = mutableListOf<Page>()
+        for ((index, pageDto) in pages.withIndex()) {
             val cleanUrl = (base + pageDto.url).substringBefore("?")
-            // Pages with s=1 are tile-scrambled (every 10th page)
-            // Use query param so the network interceptor can detect it (fragments get stripped)
-            val finalUrl = if (pageDto.s == 1) "$cleanUrl?__descramble=1" else cleanUrl
-            Page(index, imageUrl = finalUrl)
+            if (pageDto.s == 1) {
+                // Scrambled page — download, descramble, return as data URI
+                val imageUrl = descrambleToDataUri(cleanUrl)
+                resultList.add(Page(index, imageUrl = imageUrl))
+            } else {
+                resultList.add(Page(index, imageUrl = cleanUrl))
+            }
+        }
+        return resultList
+    }
+
+    /**
+     * Downloads a scrambled image, descrambles it, and returns a base64 data URI.
+     * This is needed because Mihon's image loader uses its own client, bypassing
+     * the extension's interceptors.
+     */
+    private fun descrambleToDataUri(url: String): String {
+        return try {
+            val imgResponse = client.newCall(GET(url, headers)).execute()
+            val scrambleGrid = imgResponse.header("X-Scramble-Grid") ?: "5x5"
+            val scrambleSeed = imgResponse.header("X-Scramble-Seed")?.toLongOrNull() ?: 0L
+            val scrambleHash = imgResponse.header("X-Scramble-Hash") ?: ""
+            val algo = if (imgResponse.header("X-Scramble-Algo") == "3") 2 else 1
+
+            val grid = scrambleGrid.split("x")
+            val cols = grid.getOrNull(0)?.toIntOrNull() ?: 5
+            val rows = grid.getOrNull(1)?.toIntOrNull() ?: 5
+
+            val hashSeed = SCRAMBLE_HASH_TABLE[scrambleHash.trim()] ?: 0
+            val permSeed = (scrambleSeed xor hashSeed.toLong()) and 0xFFFFFFFFL
+
+            val imageBytes = imgResponse.body?.bytes() ?: return url
+            imgResponse.close()
+
+            val bitmap = BitmapFactory.decodeStream(imageBytes.inputStream()) ?: return url
+            val tileW = bitmap.width / cols
+            val tileH = bitmap.height / rows
+            if (tileW < 1 || tileH < 1) return url
+
+            val order = buildOrder(permSeed, cols * rows, algo)
+            val output = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(output)
+
+            for (i in 0 until cols * rows) {
+                val dst = order[i]
+                val dstCol = dst % cols
+                val dstRow = dst / cols
+                val srcCol = i % cols
+                val srcRow = i / cols
+                val srcRect = Rect(srcCol * tileW, srcRow * tileH, (srcCol + 1) * tileW, (srcRow + 1) * tileH)
+                val dstRect = Rect(dstCol * tileW, dstRow * tileH, (dstCol + 1) * tileW, (dstRow + 1) * tileH)
+                canvas.drawBitmap(bitmap, srcRect, dstRect, null)
+            }
+
+            val outBytes = java.io.ByteArrayOutputStream().apply {
+                output.compress(Bitmap.CompressFormat.WEBP, 90, this)
+            }.toByteArray()
+            bitmap.recycle()
+            output.recycle()
+
+            val b64 = Base64.encodeToString(outBytes, Base64.DEFAULT)
+            "data:image/webp;base64,$b64"
+        } catch (e: Exception) {
+            url
         }
     }
 
@@ -518,76 +578,6 @@ abstract class Comix :
 
         return response.newBuilder()
             .body(content.toResponseBody("application/json".toMediaType()))
-            .build()
-    }
-
-    /**
-     * Descrambles images that have the #scrambled fragment in the URL.
-     * Every 10th page (page 9, 19, 29...) has s=1 in the API response,
-     * meaning the image is tile-scrambled with a 5x5 grid.
-     * Uses the same xorshift PRNG + Fisher-Yates as the comix.to WASM.
-     */
-    private fun descrambleImageInterceptor(chain: Interceptor.Chain): Response {
-        val request = chain.request()
-        val descrambleFlag = request.url.queryParameter("__descramble")
-
-        if (descrambleFlag == null) return chain.proceed(request)
-
-        // Strip the query param for the actual CDN request
-        val cleanRequest = request.newBuilder()
-            .url(request.url.newBuilder().removeAllQueryParameters("__descramble").build())
-            .build()
-        val response = chain.proceed(cleanRequest)
-        val body = response.body ?: return response
-
-        // Check if the CDN actually sent scramble headers — if not, return as-is
-        val scrambleGrid = response.header("X-Scramble-Grid")
-        if (scrambleGrid == null) return response
-
-        val grid = scrambleGrid.split("x")
-        val cols = grid.getOrNull(0)?.toIntOrNull() ?: 5
-        val rows = grid.getOrNull(1)?.toIntOrNull() ?: 5
-        val scrambleSeed = response.header("X-Scramble-Seed")?.toLongOrNull() ?: 0L
-        val scrambleHash = response.header("X-Scramble-Hash") ?: ""
-        val algo = if (response.header("X-Scramble-Algo") == "3") 2 else 1
-
-        val hashSeed = SCRAMBLE_HASH_TABLE[scrambleHash.trim()] ?: 0
-        val permSeed = (scrambleSeed xor hashSeed.toLong()) and 0xFFFFFFFFL
-
-        val imageBytes = body.bytes()
-        val bitmap = BitmapFactory.decodeStream(imageBytes.inputStream())
-            ?: return response
-
-        val tileW = bitmap.width / cols
-        val tileH = bitmap.height / rows
-        if (tileW < 1 || tileH < 1) return response
-
-        // Generate the permutation using the same algorithm as the WASM
-        val order = buildOrder(permSeed, cols * rows, algo)
-
-        val output = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(output)
-
-        // Apply permutation: tile i goes to position order[i]
-        for (i in 0 until cols * rows) {
-            val dst = order[i]
-            val dstCol = dst % cols
-            val dstRow = dst / cols
-            val srcCol = i % cols
-            val srcRow = i / cols
-            val srcRect = Rect(srcCol * tileW, srcRow * tileH, (srcCol + 1) * tileW, (srcRow + 1) * tileH)
-            val dstRect = Rect(dstCol * tileW, dstRow * tileH, (dstCol + 1) * tileW, (dstRow + 1) * tileH)
-            canvas.drawBitmap(bitmap, srcRect, dstRect, null)
-        }
-
-        val outBytes = java.io.ByteArrayOutputStream().apply {
-            output.compress(Bitmap.CompressFormat.WEBP, 100, this)
-        }.toByteArray()
-        bitmap.recycle()
-        output.recycle()
-
-        return response.newBuilder()
-            .body(outBytes.toResponseBody("image/webp".toMediaType()))
             .build()
     }
 
