@@ -220,10 +220,12 @@ abstract class Comix :
         val pages = container?.items ?: emptyList()
         return pages.mapIndexed { index, pageDto ->
             val cleanUrl = (base + pageDto.url).substringBefore("?")
-            // For scrambled pages (s=1), pass the URL through imageUrlParse
-            // which downloads and descrambles the image
-            val finalUrl = if (pageDto.s == 1) "$cleanUrl?__descramble=1" else cleanUrl
-            Page(index, imageUrl = finalUrl)
+            // For scrambled pages (s=1), set imageUrl=null so Mihon calls imageUrlParse
+            if (pageDto.s == 1) {
+                Page(index, url = cleanUrl, imageUrl = null)
+            } else {
+                Page(index, imageUrl = cleanUrl)
+            }
         }
     }
 
@@ -233,14 +235,9 @@ abstract class Comix :
     override fun imageRequest(page: Page): Request = GET(page.imageUrl!!, headers.newBuilder().add("Accept", "image/*,*/*;q=0.8").build())
 
     override fun imageUrlParse(response: Response): String {
-        // Check if this is a descramble request (page URL had ?__descramble=1)
-        val url = response.request.url.toString()
-        if (!url.contains("__descramble")) {
-            return throw UnsupportedOperationException()
-        }
-
+        // This is called by Mihon when imageUrl is null (scrambled pages)
         // Read scramble params from response headers
-        val scrambleGrid = response.header("X-Scramble-Grid") ?: return throw UnsupportedOperationException()
+        val scrambleGrid = response.header("X-Scramble-Grid") ?: throw UnsupportedOperationException()
         val scrambleSeed = response.header("X-Scramble-Seed")?.toLongOrNull() ?: 0L
         val scrambleHash = response.header("X-Scramble-Hash") ?: ""
         val algo = if (response.header("X-Scramble-Algo") == "3") 2 else 1
@@ -252,12 +249,12 @@ abstract class Comix :
         val hashSeed = SCRAMBLE_HASH_TABLE[scrambleHash.trim()] ?: 0
         val permSeed = (scrambleSeed xor hashSeed.toLong()) and 0xFFFFFFFFL
 
-        val imageBytes = response.body?.bytes() ?: return throw UnsupportedOperationException()
-        val bitmap = BitmapFactory.decodeStream(imageBytes.inputStream()) ?: return throw UnsupportedOperationException()
+        val imageBytes = response.body?.bytes() ?: throw UnsupportedOperationException()
+        val bitmap = BitmapFactory.decodeStream(imageBytes.inputStream()) ?: throw UnsupportedOperationException()
 
         val tileW = bitmap.width / cols
         val tileH = bitmap.height / rows
-        if (tileW < 1 || tileH < 1) return throw UnsupportedOperationException()
+        if (tileW < 1 || tileH < 1) throw UnsupportedOperationException()
 
         val order = buildOrder(permSeed, cols * rows, algo)
         val output = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
@@ -716,16 +713,49 @@ abstract class Comix :
             .filterNot { it.lowercase() in blockedGenres }
             .joinToString(", ")
 
-        // Build score line (white star ☆)
+        // Build score stars
         val hasScore = ratedAvg != null && ratedCount != null && ratedCount > 0
-        val scoreLine = if (hasScore) "☆ $ratedAvg/10 — $ratedCount votes" else null
+        val stars = if (hasScore) {
+            val score = ratedAvg!!
+            val fullStars = score.div(2).toInt().coerceIn(0, 5)
+            "★".repeat(fullStars) + "☆".repeat(5 - fullStars) + " $score"
+        } else {
+            null
+        }
+
+        // Build info line
+        val infoLine = buildString {
+            if (year != null) append("Year: $year")
+            if (latestChapter != null && latestChapter > 0) {
+                if (isNotEmpty()) append(" · ")
+                append("Chapters: ${latestChapter.toString().removeSuffix(".0")}")
+            }
+            if (followsTotal != null && followsTotal > 0) {
+                if (isNotEmpty()) append(" · ")
+                append("Tracked: $followsTotal")
+            }
+            if (contentRating != null) {
+                if (isNotEmpty()) append(" · ")
+                append("Content Rating: ${formatContentRating(contentRating)}")
+            }
+            if (hasScore) {
+                if (isNotEmpty()) append(" · ")
+                append("$ratedCount ratings")
+            }
+        }.ifBlank { null }
 
         // Build description
         val desc = buildString {
-            // Score at top
-            if (scorePosition == "top" && scoreLine != null) {
-                append(scoreLine)
-                append("\n\n")
+            // Score + info at top
+            if (scorePosition == "top" || scorePosition == "end") {
+                if (stars != null) {
+                    append(stars)
+                    append("\n")
+                }
+                if (infoLine != null) {
+                    append(infoLine)
+                    append("\n\n")
+                }
             }
 
             synopsis?.let { append(it) }
@@ -734,27 +764,6 @@ abstract class Comix :
                 if (isNotEmpty()) append("\n\n")
                 append("Alternative names:\n")
                 append(altTitles.joinToString("\n") { "• $it" })
-            }
-
-            if (showExtraInfo) {
-                if (isNotEmpty()) append("\n\n")
-                append("Type: ${type ?: "Unknown"}\n")
-                append("Status: ${formatStatus(this@toSManga.status)}\n")
-                append("Year: ${year ?: "?"}\n")
-                append("Content: ${formatContentRating(contentRating)}\n")
-                append("Original language: ${formatLanguage(originalLanguage)}\n")
-                if (followsTotal != null && followsTotal > 0) {
-                    append("Follows: $followsTotal\n")
-                }
-                if (latestChapter != null && latestChapter > 0) {
-                    append("Latest chapter: ${latestChapter.toString().removeSuffix(".0")}\n")
-                }
-            }
-
-            // Score at end
-            if (scorePosition == "end" && scoreLine != null) {
-                if (isNotEmpty()) append("\n\n")
-                append(scoreLine)
             }
         }.trim()
 
