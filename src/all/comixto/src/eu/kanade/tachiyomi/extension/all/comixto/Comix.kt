@@ -1,9 +1,5 @@
 package eu.kanade.tachiyomi.extension.all.comixto
 
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Rect
 import android.util.Base64
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.ConfigurableSource
@@ -23,7 +19,9 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.ResponseBody.Companion.asResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.Buffer
 
 @Source
 abstract class Comix :
@@ -37,7 +35,7 @@ abstract class Comix :
     override val client: OkHttpClient = network.client.newBuilder()
         .addInterceptor(::signRequestInterceptor)
         .addInterceptor(::decryptResponseInterceptor)
-        .addNetworkInterceptor(Descrambler.interceptor)
+        .addNetworkInterceptor(::descrambleImageInterceptor)
         .build()
 
     // Default headers: only Referer (safe for both API and image requests)
@@ -512,60 +510,109 @@ abstract class Comix :
     }
 
     /**
-     * Generates a permutation of [count] elements using a seeded PRNG.
-     * Implements the exact algorithm from the comix.to WASM (decompiled via wasm2wat).
-     * V2 uses xorshift(21,1,5) + accumulator mixing + Fisher-Yates shuffle.
+     * Descrambles images with x-scramble-* headers.
+     * Uses xorshift(13,17,5) + Fisher-Yates with inverse permutation.
      */
-    private fun buildOrder(seed: Long, count: Int, algo: Int): IntArray {
-        val arr = IntArray(count) { it }
-        if (count < 2) return arr
+    private fun descrambleImageInterceptor(chain: Interceptor.Chain): Response {
+        val response = chain.proceed(chain.request())
+        if (!response.isSuccessful) return response
 
-        var state = (seed.toInt() or 1)
+        val rawScrambleSeed = response.header("x-scramble-seed")
+        val rawScrambleGrid = response.header("x-scramble-grid")
+        val rawScrambleAlgo = response.header("x-scramble-algo")
+        val rawScrambleHash = response.header("x-scramble-hash")
 
-        if (algo == 2) {
-            // buildOrderV2: shifts 21, 1, 5 with accumulator
-            val shl1 = 21
-            val shr = 1
-            val shl2 = 5
-            var acc = 0
-
-            // Initialize array and accumulator
-            for (i in 0 until count) {
-                arr[i] = i
-                acc = (acc xor i) + i * shl1
-            }
-
-            // Fisher-Yates shuffle
-            var n = count
-            while (n >= 2) {
-                state = state xor (state shl shl1)
-                acc += state * n
-                state = state xor (state ushr shr)
-                acc = (acc shl 9 or (acc ushr 23)) xor state
-                state = state xor (state shl shl2)
-
-                val j = java.lang.Integer.remainderUnsigned(state, n)
-                val oldN1 = arr[n - 1]
-                val oldJ = arr[j]
-                arr[n - 1] = oldJ
-                arr[j] = oldN1
-                acc = (acc shl 5) xor (oldN1 + oldJ)
-                n--
-            }
-        } else {
-            // buildOrderV1: LCG-based Fisher-Yates
-            var n = count
-            while (n >= 2) {
-                state = state * 22695477 + 1
-                val j = ((state ushr 16) and 0x7FFFFFFF) % n
-                val tmp = arr[n - 1]
-                arr[n - 1] = arr[j]
-                arr[j] = tmp
-                n--
-            }
+        val scrambleSeed = rawScrambleSeed?.toLongOrNull()?.toInt()
+        val scrambleHash = when (rawScrambleHash?.trim()) {
+            "03632" -> 58414
+            "02900" -> 117532
+            else -> 0
         }
 
-        return arr
+        val shouldDescramble = rawScrambleGrid == "5x5" &&
+            (rawScrambleAlgo == null || rawScrambleAlgo == "1" || rawScrambleAlgo == "2" || rawScrambleAlgo == "3") &&
+            scrambleSeed != null && scrambleSeed != 0
+
+        if (!shouldDescramble) return response
+
+        val body = response.body ?: return response
+        val imageBytes = body.bytes()
+
+        val bitmap = android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+            ?: return response
+
+        val cols = 5
+        val rows = 5
+        val numTiles = cols * rows
+        val tileW = bitmap.width / cols
+        val tileH = bitmap.height / rows
+
+        val seed = scrambleSeed!! xor scrambleHash
+        val order = if (rawScrambleAlgo == "3") buildOrderXorshift(seed, numTiles) else buildOrderLcg(seed, numTiles)
+
+        val output = android.graphics.Bitmap.createBitmap(bitmap.width, bitmap.height, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(output)
+        canvas.drawBitmap(bitmap, 0f, 0f, null)
+
+        for (dstIdx in 0 until numTiles) {
+            val srcIdx = order[dstIdx]
+            val srcCol = srcIdx % cols
+            val srcRow = srcIdx / cols
+            val dstCol = dstIdx % cols
+            val dstRow = dstIdx / cols
+            val srcRect = android.graphics.Rect(srcCol * tileW, srcRow * tileH, (srcCol + 1) * tileW, (srcRow + 1) * tileH)
+            val dstRect = android.graphics.Rect(dstCol * tileW, dstRow * tileH, (dstCol + 1) * tileW, (dstRow + 1) * tileH)
+            canvas.drawBitmap(bitmap, srcRect, dstRect, null)
+        }
+
+        bitmap.recycle()
+
+        val jpegMedia = "image/jpeg".toMediaType()
+        val buffer = Buffer()
+        output.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, buffer.outputStream())
+        output.recycle()
+
+        return response.newBuilder()
+            .removeHeader("Content-Length")
+            .removeHeader("Content-Type")
+            .body(buffer.asResponseBody(jpegMedia, buffer.size))
+            .build()
+    }
+
+    private fun buildOrderXorshift(seed: Int, n: Int): IntArray {
+        val arr = IntArray(n) { it }
+        var state = seed or 1
+        for (i in n - 1 downTo 1) {
+            state = state xor (state shl 13)
+            state = state xor (state ushr 17)
+            state = state xor (state shl 5)
+            val j = (state.toLong() and 0xFFFFFFFFL) % (i + 1)
+            val tmp = arr[i]
+            arr[i] = arr[j.toInt()]
+            arr[j.toInt()] = tmp
+        }
+        return IntArray(n).also { inverse ->
+            for (i in arr.indices) {
+                inverse[arr[i]] = i
+            }
+        }
+    }
+
+    private fun buildOrderLcg(seed: Int, n: Int): IntArray {
+        val arr = IntArray(n) { it }
+        var state = seed
+        for (i in n - 1 downTo 1) {
+            state = state * 1664525 + 1013904223
+            val j = (state.toLong() and 0xFFFFFFFFL) % (i + 1)
+            val tmp = arr[i]
+            arr[i] = arr[j.toInt()]
+            arr[j.toInt()] = tmp
+        }
+        return IntArray(n).also { inverse ->
+            for (i in arr.indices) {
+                inverse[arr[i]] = i
+            }
+        }
     }
 
     // --- S-box constants (extracted from the site JS) ---
@@ -938,10 +985,6 @@ abstract class Comix :
     private fun android.content.SharedPreferences.getScorePosition(): String = getString(PREF_SCORE_POSITION, "end") ?: "end"
 
     companion object {
-        private val SCRAMBLE_HASH_TABLE = mapOf(
-            "03632" to 58414,
-            "02900" to 117532,
-        )
 
         private const val PREF_CONTENT_RATING = "pref_content_rating"
         private const val PREF_DEFAULT_TYPES = "pref_default_types"
