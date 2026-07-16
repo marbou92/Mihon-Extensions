@@ -222,8 +222,8 @@ abstract class Comix :
         return pages.mapIndexed { index, pageDto ->
             val cleanUrl = (base + pageDto.url).substringBefore("?")
             // Pages with s=1 are tile-scrambled (every 10th page)
-            // Append fragment #scrambled so the image interceptor knows to descramble
-            val finalUrl = if (pageDto.s == 1) "$cleanUrl#scrambled" else cleanUrl
+            // Use query param so the network interceptor can detect it (fragments get stripped)
+            val finalUrl = if (pageDto.s == 1) "$cleanUrl?__descramble=1" else cleanUrl
             Page(index, imageUrl = finalUrl)
         }
     }
@@ -529,13 +529,13 @@ abstract class Comix :
      */
     private fun descrambleImageInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        val fragment = request.url.fragment
+        val descrambleFlag = request.url.queryParameter("__descramble")
 
-        if (fragment != "scrambled") return chain.proceed(request)
+        if (descrambleFlag == null) return chain.proceed(request)
 
-        // Strip fragment for the actual CDN request
+        // Strip the query param for the actual CDN request
         val cleanRequest = request.newBuilder()
-            .url(request.url.newBuilder().fragment(null).build())
+            .url(request.url.newBuilder().removeAllQueryParameters("__descramble").build())
             .build()
         val response = chain.proceed(cleanRequest)
         val body = response.body ?: return response
