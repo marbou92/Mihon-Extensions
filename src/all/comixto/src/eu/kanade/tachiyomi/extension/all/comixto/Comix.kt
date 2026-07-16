@@ -37,6 +37,7 @@ abstract class Comix :
     override val client: OkHttpClient = network.client.newBuilder()
         .addInterceptor(::signRequestInterceptor)
         .addInterceptor(::decryptResponseInterceptor)
+        .addNetworkInterceptor(Descrambler.interceptor)
         .build()
 
     // Default headers: only Referer (safe for both API and image requests)
@@ -226,57 +227,7 @@ abstract class Comix :
 
     override fun imageRequest(page: Page): Request = GET(page.imageUrl!!, headers)
 
-    override fun imageUrlParse(response: Response): String {
-        // Check if this image is scrambled via response headers
-        val scrambleGrid = response.header("X-Scramble-Grid") ?: throw UnsupportedOperationException()
-        val body = response.body ?: throw UnsupportedOperationException()
-
-        val grid = scrambleGrid.split("x")
-        val cols = grid.getOrNull(0)?.toIntOrNull() ?: 5
-        val rows = grid.getOrNull(1)?.toIntOrNull() ?: 5
-        val scrambleSeed = response.header("X-Scramble-Seed")?.toLongOrNull() ?: 0L
-        val scrambleHash = response.header("X-Scramble-Hash") ?: ""
-        val algo = if (response.header("X-Scramble-Algo") == "3") 2 else 1
-
-        val hashSeed = SCRAMBLE_HASH_TABLE[scrambleHash.trim()] ?: 0
-        val permSeed = (scrambleSeed xor hashSeed.toLong()) and 0xFFFFFFFFL
-
-        val imageBytes = body.bytes()
-        val bitmap = BitmapFactory.decodeStream(imageBytes.inputStream()) ?: throw UnsupportedOperationException()
-
-        val tileW = bitmap.width / cols
-        val tileH = bitmap.height / rows
-        if (tileW < 1 || tileH < 1) throw UnsupportedOperationException()
-
-        val order = buildOrder(permSeed, cols * rows, algo)
-        val output = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(output)
-
-        for (i in 0 until cols * rows) {
-            val dst = order[i]
-            val dstCol = dst % cols
-            val dstRow = dst / cols
-            val srcCol = i % cols
-            val srcRow = i / cols
-            val srcRect = Rect(srcCol * tileW, srcRow * tileH, (srcCol + 1) * tileW, (srcRow + 1) * tileH)
-            val dstRect = Rect(dstCol * tileW, dstRow * tileH, (dstCol + 1) * tileW, (dstRow + 1) * tileH)
-            canvas.drawBitmap(bitmap, srcRect, dstRect, null)
-        }
-
-        val outBytes = java.io.ByteArrayOutputStream().apply {
-            output.compress(Bitmap.CompressFormat.JPEG, 95, this)
-        }.toByteArray()
-        bitmap.recycle()
-        output.recycle()
-
-        // Write to cache file and return file:// URL
-        val cacheDir = java.io.File(System.getProperty("java.io.tmpdir"), "comix_descramble")
-        cacheDir.mkdirs()
-        val cacheFile = java.io.File(cacheDir, "page_${System.currentTimeMillis()}.jpg")
-        cacheFile.writeBytes(outBytes)
-
-        return cacheFile.toURI().toString()
-    }
+    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
     private fun mangaListRequest(
         page: Int,
