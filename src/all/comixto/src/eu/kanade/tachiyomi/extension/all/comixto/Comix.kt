@@ -218,79 +218,65 @@ abstract class Comix :
         val container = data.pages
         val base = container?.baseUrl.orEmpty()
         val pages = container?.items ?: emptyList()
-        val resultList = mutableListOf<Page>()
-        for ((index, pageDto) in pages.withIndex()) {
+        return pages.mapIndexed { index, pageDto ->
             val cleanUrl = (base + pageDto.url).substringBefore("?")
-            if (pageDto.s == 1) {
-                // Scrambled page — download and descramble NOW, write to cache file
-                val cachedUrl = downloadAndDescramble(cleanUrl, index)
-                resultList.add(Page(index, imageUrl = cachedUrl))
-            } else {
-                resultList.add(Page(index, imageUrl = cleanUrl))
-            }
-        }
-        return resultList
-    }
-
-    /**
-     * Downloads a scrambled image, descrambles it, writes to a temp file,
-     * and returns a file:// URL that Mihon can load directly.
-     */
-    private fun downloadAndDescramble(url: String, pageIndex: Int): String {
-        return try {
-            val imgResponse = client.newCall(GET(url, headers)).execute()
-            val scrambleGrid = imgResponse.header("X-Scramble-Grid") ?: return url
-            val scrambleSeed = imgResponse.header("X-Scramble-Seed")?.toLongOrNull() ?: 0L
-            val scrambleHash = imgResponse.header("X-Scramble-Hash") ?: ""
-            val algo = if (imgResponse.header("X-Scramble-Algo") == "3") 2 else 1
-
-            val grid = scrambleGrid.split("x")
-            val cols = grid.getOrNull(0)?.toIntOrNull() ?: 5
-            val rows = grid.getOrNull(1)?.toIntOrNull() ?: 5
-
-            val hashSeed = SCRAMBLE_HASH_TABLE[scrambleHash.trim()] ?: 0
-            val permSeed = (scrambleSeed xor hashSeed.toLong()) and 0xFFFFFFFFL
-
-            val imageBytes = imgResponse.body?.bytes() ?: return url
-            imgResponse.close()
-
-            val bitmap = BitmapFactory.decodeStream(imageBytes.inputStream()) ?: return url
-            val tileW = bitmap.width / cols
-            val tileH = bitmap.height / rows
-            if (tileW < 1 || tileH < 1) return url
-
-            val order = buildOrder(permSeed, cols * rows, algo)
-            val output = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(output)
-
-            for (i in 0 until cols * rows) {
-                val dst = order[i]
-                val dstCol = dst % cols
-                val dstRow = dst / cols
-                val srcCol = i % cols
-                val srcRow = i / cols
-                val srcRect = Rect(srcCol * tileW, srcRow * tileH, (srcCol + 1) * tileW, (srcRow + 1) * tileH)
-                val dstRect = Rect(dstCol * tileW, dstRow * tileH, (dstCol + 1) * tileW, (dstRow + 1) * tileH)
-                canvas.drawBitmap(bitmap, srcRect, dstRect, null)
-            }
-
-            // Write to cache file
-            val cacheDir = java.io.File(System.getProperty("java.io.tmpdir"), "comix_descramble")
-            cacheDir.mkdirs()
-            val cacheFile = java.io.File(cacheDir, "page_${System.currentTimeMillis()}_$pageIndex.webp")
-            java.io.FileOutputStream(cacheFile).use { fos ->
-                output.compress(Bitmap.CompressFormat.WEBP, 90, fos)
-            }
-            bitmap.recycle()
-            output.recycle()
-
-            "file://${cacheFile.absolutePath}"
-        } catch (e: Exception) {
-            url
+            Page(index, imageUrl = cleanUrl)
         }
     }
 
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
+    override fun imageRequest(page: Page): Request = GET(page.imageUrl!!, headers)
+
+    override fun imageUrlParse(response: Response): String {
+        // Check if this image is scrambled via response headers
+        val scrambleGrid = response.header("X-Scramble-Grid") ?: throw UnsupportedOperationException()
+        val body = response.body ?: throw UnsupportedOperationException()
+
+        val grid = scrambleGrid.split("x")
+        val cols = grid.getOrNull(0)?.toIntOrNull() ?: 5
+        val rows = grid.getOrNull(1)?.toIntOrNull() ?: 5
+        val scrambleSeed = response.header("X-Scramble-Seed")?.toLongOrNull() ?: 0L
+        val scrambleHash = response.header("X-Scramble-Hash") ?: ""
+        val algo = if (response.header("X-Scramble-Algo") == "3") 2 else 1
+
+        val hashSeed = SCRAMBLE_HASH_TABLE[scrambleHash.trim()] ?: 0
+        val permSeed = (scrambleSeed xor hashSeed.toLong()) and 0xFFFFFFFFL
+
+        val imageBytes = body.bytes()
+        val bitmap = BitmapFactory.decodeStream(imageBytes.inputStream()) ?: throw UnsupportedOperationException()
+
+        val tileW = bitmap.width / cols
+        val tileH = bitmap.height / rows
+        if (tileW < 1 || tileH < 1) throw UnsupportedOperationException()
+
+        val order = buildOrder(permSeed, cols * rows, algo)
+        val output = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(output)
+
+        for (i in 0 until cols * rows) {
+            val dst = order[i]
+            val dstCol = dst % cols
+            val dstRow = dst / cols
+            val srcCol = i % cols
+            val srcRow = i / cols
+            val srcRect = Rect(srcCol * tileW, srcRow * tileH, (srcCol + 1) * tileW, (srcRow + 1) * tileH)
+            val dstRect = Rect(dstCol * tileW, dstRow * tileH, (dstCol + 1) * tileW, (dstRow + 1) * tileH)
+            canvas.drawBitmap(bitmap, srcRect, dstRect, null)
+        }
+
+        val outBytes = java.io.ByteArrayOutputStream().apply {
+            output.compress(Bitmap.CompressFormat.JPEG, 95, this)
+        }.toByteArray()
+        bitmap.recycle()
+        output.recycle()
+
+        // Write to cache file and return file:// URL
+        val cacheDir = java.io.File(System.getProperty("java.io.tmpdir"), "comix_descramble")
+        cacheDir.mkdirs()
+        val cacheFile = java.io.File(cacheDir, "page_${System.currentTimeMillis()}.jpg")
+        cacheFile.writeBytes(outBytes)
+
+        return cacheFile.toURI().toString()
+    }
 
     private fun mangaListRequest(
         page: Int,
