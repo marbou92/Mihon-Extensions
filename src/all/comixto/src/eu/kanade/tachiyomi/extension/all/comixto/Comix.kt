@@ -35,9 +35,9 @@ abstract class Comix :
     private val preferences = getPreferences()
 
     override val client: OkHttpClient = network.client.newBuilder()
+        .addInterceptor(::descrambleImageInterceptor)
         .addInterceptor(::signRequestInterceptor)
         .addInterceptor(::decryptResponseInterceptor)
-        .addInterceptor(::descrambleImageInterceptor)
         .build()
 
     // Default headers: only Referer (safe for both API and image requests)
@@ -250,10 +250,11 @@ abstract class Comix :
             .build()
         val response = chain.proceed(cleanRequest)
 
-        // Check if CDN sent scramble headers
-        val scrambleGrid = response.header("X-Scramble-Grid") ?: return response
-        val body = response.body ?: return response
+        // Check if CDN sent scramble headers — if not, return as-is
+        val scrambleGrid = response.header("X-Scramble-Grid")
+        if (scrambleGrid == null) return response
 
+        val body = response.body ?: return response
         val grid = scrambleGrid.split("x")
         val cols = grid.getOrNull(0)?.toIntOrNull() ?: 5
         val rows = grid.getOrNull(1)?.toIntOrNull() ?: 5
