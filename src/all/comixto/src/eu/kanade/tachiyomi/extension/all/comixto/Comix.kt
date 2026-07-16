@@ -215,7 +215,8 @@ abstract class Comix :
         val base = container?.baseUrl.orEmpty()
         val pages = container?.items ?: emptyList()
         return pages.mapIndexed { index, pageDto ->
-            Page(index, imageUrl = base + pageDto.url)
+            val cleanUrl = (base + pageDto.url).substringBefore("?")
+            Page(index, imageUrl = cleanUrl)
         }
     }
 
