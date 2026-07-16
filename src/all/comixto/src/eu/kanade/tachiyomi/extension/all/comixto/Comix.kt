@@ -37,7 +37,7 @@ abstract class Comix :
     override val client: OkHttpClient = network.client.newBuilder()
         .addInterceptor(::signRequestInterceptor)
         .addInterceptor(::decryptResponseInterceptor)
-        .addNetworkInterceptor(::descrambleImageInterceptor)
+        .addInterceptor(::descrambleImageInterceptor)
         .build()
 
     // Default headers: only Referer (safe for both API and image requests)
@@ -221,32 +221,36 @@ abstract class Comix :
         val pages = container?.items ?: emptyList()
         return pages.mapIndexed { index, pageDto ->
             val cleanUrl = (base + pageDto.url).substringBefore("?")
-            val finalUrl = if (pageDto.s == 1) "$cleanUrl?__descramble=1" else cleanUrl
+            // For scrambled pages (s=1), add #scrambled fragment so interceptor knows to descramble
+            val finalUrl = if (pageDto.s == 1) "$cleanUrl#scrambled" else cleanUrl
             Page(index, imageUrl = finalUrl)
         }
     }
 
-    // Mihon downloads images using a SEPARATE client. The image CDNs require
-    // a proper User-Agent and Referer, otherwise they may return a Cloudflare
-    // challenge page (HTML) instead of image data, causing decoder errors.
-    override fun imageRequest(page: Page): Request {
-        val url = page.imageUrl!!
-        // Strip __descramble param for the actual CDN request
-        val cleanUrl = url.substringBefore("?__descramble")
-        return GET(cleanUrl, headers.newBuilder().add("Accept", "image/*,*/*;q=0.8").build())
-    }
+    // Mihon downloads images using the extension's client, so interceptors fire.
+    override fun imageRequest(page: Page): Request = GET(page.imageUrl!!, headers)
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
     /**
      * Descrambles scrambled images (every 10th page with s=1).
      * Uses the same xorshift PRNG + Fisher-Yates as the comix.to WASM.
+     * Pattern matches AsuraScans: addInterceptor + URL fragment.
      */
     private fun descrambleImageInterceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        val response = chain.proceed(request)
+        val fragment = request.url.fragment
 
-        // Check if this image is scrambled (via response headers)
+        // Only descramble if URL has #scrambled fragment
+        if (fragment != "scrambled") return chain.proceed(request)
+
+        // Strip fragment for CDN request
+        val cleanRequest = request.newBuilder()
+            .url(request.url.newBuilder().fragment(null).build())
+            .build()
+        val response = chain.proceed(cleanRequest)
+
+        // Check if CDN sent scramble headers
         val scrambleGrid = response.header("X-Scramble-Grid") ?: return response
         val body = response.body ?: return response
 
