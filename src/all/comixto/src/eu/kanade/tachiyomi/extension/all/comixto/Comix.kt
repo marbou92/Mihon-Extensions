@@ -37,7 +37,7 @@ abstract class Comix :
     override val client: OkHttpClient = network.client.newBuilder()
         .addInterceptor(::signRequestInterceptor)
         .addInterceptor(::decryptResponseInterceptor)
-        .addInterceptor(::descrambleImageInterceptor)
+        .addNetworkInterceptor(::descrambleImageInterceptor)
         .build()
 
     // Default headers: only Referer (safe for both API and image requests)
@@ -533,14 +533,18 @@ abstract class Comix :
 
         if (fragment != "scrambled") return chain.proceed(request)
 
+        // Strip fragment for the actual CDN request
         val cleanRequest = request.newBuilder()
             .url(request.url.newBuilder().fragment(null).build())
             .build()
         val response = chain.proceed(cleanRequest)
         val body = response.body ?: return response
 
-        // Read scramble params from response headers
-        val grid = (response.header("X-Scramble-Grid") ?: "5x5").split("x")
+        // Check if the CDN actually sent scramble headers — if not, return as-is
+        val scrambleGrid = response.header("X-Scramble-Grid")
+        if (scrambleGrid == null) return response
+
+        val grid = scrambleGrid.split("x")
         val cols = grid.getOrNull(0)?.toIntOrNull() ?: 5
         val rows = grid.getOrNull(1)?.toIntOrNull() ?: 5
         val scrambleSeed = response.header("X-Scramble-Seed")?.toLongOrNull() ?: 0L
