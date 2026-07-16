@@ -620,7 +620,7 @@ abstract class Comix :
                 acc = (acc shl 9 or (acc ushr 23)) xor state
                 state = state xor (state shl shl2)
 
-                val j = state % n
+                val j = java.lang.Integer.remainderUnsigned(state, n)
                 val oldN1 = arr[n - 1]
                 val oldJ = arr[j]
                 arr[n - 1] = oldJ
